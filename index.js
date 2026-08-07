@@ -3,10 +3,12 @@ const express = require('express');
 const cors = require('cors');
 const { getGarminData } = require('./garmin');
 const { getBaseRecommendation } = require('./rule');
-const { getAiRecommendation } = require('./ai'); // 새로 추가된 모듈
+const { getAiRecommendation } = require('./ai');
 
 const app = express();
-const PORT = 3000;
+
+// 🚨 핵심 수정 부분: Render가 알아서 포트를 배정하도록 변경합니다.
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -14,8 +16,23 @@ app.use(express.json());
 app.get('/api/daily-plan', async (req, res) => {
     try {
         console.log("1. 가민 데이터 수집 시작...");
-        const garminData = await getGarminData();
         
+        // --- 🚨 [가민 서버 차단 방지용 세팅] ---
+        // 가민 서버가 429 에러로 차단했을 때는 아래 1줄을 주석(//) 처리하고, 
+        // 그 아래에 있는 가짜 데이터 주석(/* */)을 풀어서 사용하세요!
+        
+        const garminData = await getGarminData(); 
+        
+        /* [가짜 데이터 시작] - 필요할 때만 주석을 지우고 사용하세요.
+        const garminData = {
+            date: "2026-08-07",
+            bodyBattery: 50,
+            sleepScore: 50,
+            restingHeartRate: 44
+        };
+        [가짜 데이터 끝] */
+        // ----------------------------------------
+
         console.log("2. 1차 추천 로직 계산 중...");
         const recommendation = getBaseRecommendation(garminData);
 
@@ -26,7 +43,7 @@ app.get('/api/daily-plan', async (req, res) => {
         const finalResponse = {
             garmin: garminData,
             systemRule: recommendation,
-            aiCoach: aiPlan // AI의 응답 포함
+            aiCoach: aiPlan
         };
 
         res.json(finalResponse);
@@ -38,6 +55,7 @@ app.get('/api/daily-plan', async (req, res) => {
     }
 });
 
+// 🚨 핵심 수정 부분: 콘솔 로그도 동적 포트를 표시하도록 변경합니다.
 app.listen(PORT, () => {
-    console.log(`서버가 http://localhost:${PORT} 에서 실행 중입니다.`);
+    console.log(`서버가 ${PORT}번 포트에서 실행 중입니다.`);
 });
