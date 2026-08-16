@@ -7,7 +7,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 async function getAiRecommendation(garminData, systemRule) {
     // gemini-2.5-flash 모델 사용 (속도가 빠르고 JSON 출력에 강함)
     const model = genAI.getGenerativeModel({
-        model: "gemini-3.5-flash",
+        model: "gemini-2.5-flash",
         generationConfig: {
             responseMimeType: "application/json", // 핵심: 무조건 JSON 형태로만 답하도록 강제
         }

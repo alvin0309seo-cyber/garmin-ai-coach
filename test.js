@@ -1,11 +1,11 @@
+require('dotenv').config();
 const { GarminConnect } = require('garmin-connect');
 
 async function testMethods() {
     try {
         const gcClient = new GarminConnect({
-            // 🚨 여기에 본인의 진짜 가민 이메일과 비밀번호를 다시 적어주세요!
-            username: 'alvin0309.seo@gmail.com',
-            password: '!Kh030900'
+            username: process.env.GARMIN_USERNAME,
+            password: process.env.GARMIN_PASSWORD
         });
         
         await gcClient.login();
