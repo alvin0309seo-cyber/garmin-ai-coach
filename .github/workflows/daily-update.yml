@@ -1,0 +1,39 @@
+name: Daily Garmin AI Coach Update
+
+on:
+  # 1. 매일 아침 7시 (KST) 자동 실행 (UTC 기준 전날 22:00)
+  schedule:
+    - cron: '0 22 * * *'
+  
+  # 2. GitHub 웹 화면에서 'Run workflow' 버튼을 눌러 수동으로 즉시 테스트 가능
+  workflow_dispatch:
+
+jobs:
+  update-daily-plan:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 저장소 코드 다운로드
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Node.js 환경 설정
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      # 패키지 설치
+      - name: Install Dependencies
+        run: npm ci
+
+      # DB 업데이트 스크립트 실행
+      - name: Run update_db.js
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GARMIN_USERNAME: ${{ secrets.GARMIN_USERNAME }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: node update_db.js
