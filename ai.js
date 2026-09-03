@@ -1,13 +1,20 @@
 require('dotenv').config();
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { cleanEnv } = require('./env');
 
 // Gemini API 초기화 (미리 발급받은 키 사용)
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// 🚨 핵심 수정: .env/OS/시크릿 어디서 왔든 따옴표·공백을 벗긴 키를 사용
+const apiKey = cleanEnv('GEMINI_API_KEY');
+if (!apiKey) {
+    throw new Error('❌ GEMINI_API_KEY 환경변수가 없습니다. .env 또는 GitHub Actions 시크릿을 확인하세요.');
+}
+const genAI = new GoogleGenerativeAI(apiKey);
 
 async function getAiRecommendation(garminData, systemRule) {
-    // gemini-2.5-flash 모델 사용 (속도가 빠르고 JSON 출력에 강함)
+    // 🚨 핵심 수정: gemini-2.5-flash 가 더 이상 신규 사용자에게 제공되지 않아 404 발생.
+    // gemini-3.6-flash 로 업데이트 (Google 권장).
     const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.6-flash",
         generationConfig: {
             responseMimeType: "application/json", // 핵심: 무조건 JSON 형태로만 답하도록 강제
         }
