@@ -41,9 +41,45 @@ async function fetchWithRetry(fn, label) {
     throw lastError;
 }
 
-async function getGarminData() {
+// 🚨 핵심: 항목별 독립 수집. 하나가 실패해도(null 폴백) 전체 파이프라인이 죽지 않게.
+async function safe(label, fn) {
     try {
-        const gcClient = new GarminConnect({
+        return await fn();
+    } catch (err) {
+        console.warn(`⚠️ 가민 ${label} 수집 실패 → null (계속 진행): ${err.message}`);
+        return null;
+    }
+}
+
+// 소수 1자리 반올림 (null/undefined 통과)
+function round1(n) {
+    return n == null ? null : Math.round(n * 10) / 10;
+}
+// 정수 반올림 (null/undefined 통과)
+function roundInt(n) {
+    return n == null ? null : Math.round(n);
+}
+// 소수 2자리 반올림 (null/undefined 통과)
+function round2(n) {
+    return n == null ? null : Math.round(n * 100) / 100;
+}
+
+// 생년월일(YYYY-MM-DD)로 만 나이 계산
+function computeAge(birthDate) {
+    if (!birthDate) return null;
+    const b = new Date(birthDate);
+    if (isNaN(b.getTime())) return null;
+    const now = new Date();
+    let age = now.getFullYear() - b.getFullYear();
+    const m = now.getMonth() - b.getMonth();
+    if (m < 0 || (m === 0 && now.getDate() < b.getDate())) age--;
+    return age;
+}
+
+async function getGarminData() {
+    let gcClient;
+    try {
+        gcClient = new GarminConnect({
             username: cleanEnv('GARMIN_USERNAME'),
             password: cleanEnv('GARMIN_PASSWORD')
         });
@@ -92,19 +128,124 @@ async function getGarminData() {
         // 🚨 글씨가 아닌 진짜 '날짜(Date) 객체'를 만듭니다.
         const today = new Date();
 
-        // 화면에 보여주기 위한 텍스트(YYYY-MM-DD) 만들기
+        // 화면에 보여주기 위한 텍스트(YYYY-MM-DD) 만들기 (KST)
         const kstDate = new Date(today.getTime() + (9 * 60 * 60 * 1000));
         const dateString = kstDate.toISOString().split('T')[0];
 
-        // 🚨 핵심 수정: dateString(글씨) 대신 today(날짜 객체)를 통째로 집어넣습니다!
-        const sleepData = await fetchWithRetry(() => gcClient.getSleepData(today), '수면');
-        const heartRateData = await fetchWithRetry(() => gcClient.getHeartRate(today), '심박');
+        // ─────────────────────────────────────────────────────────────
+        // 각 데이터 소스를 독립적으로 수집 (하나 실패해도 null, 파이프라인 생존)
+        // ─────────────────────────────────────────────────────────────
+        const sleepData = await safe('수면', () => fetchWithRetry(() => gcClient.getSleepData(today), '수면'));
+        const heartRateData = await safe('심박', () => fetchWithRetry(() => gcClient.getHeartRate(today), '심박'));
+        const steps = await safe('걸음수', () => fetchWithRetry(() => gcClient.getSteps(today), '걸음수'));
+        const weightData = await safe('체성분', () => fetchWithRetry(() => gcClient.getDailyWeightData(today), '체성분'));
+        // 🚨 수분: 라이브러리 getDailyHydration()은 valueInML이 0이면 falsy라 throw 하고,
+        //    정상이어도 온스(oz)로 변환해 반환한다. 따라서 raw 엔드포인트로 valueInML/goal/sweat를 직접 읽는다.
+        const hydrationRaw = await safe('수분', () => fetchWithRetry(
+            () => gcClient.get('https://connectapi.garmin.com/usersummary-service/usersummary/hydration/allData/' + dateString),
+            '수분'
+        ));
+        // 🚨 프로필: getUserProfile()(socialProfile)에는 나이/성별/키/몸무게가 없어서
+        //    getUserSettings()(userprofile-service)의 userData에서 읽는다.
+        const settings = await safe('프로필', () => fetchWithRetry(() => gcClient.getUserSettings(), '프로필'));
+        const activities = await safe('최근활동', () => fetchWithRetry(() => gcClient.getActivities(0, 5), '활동'));
+        // 🚨 스트레스: raw wellness-service dailyStress
+        const stressData = await safe('스트레스', () => fetchWithRetry(
+            () => gcClient.get('https://connectapi.garmin.com/wellness-service/wellness/dailyStress/' + dateString),
+            '스트레스'
+        ));
+
+        // ─────────────────────────────────────────────────────────────
+        // 필드 매핑 (실측한 실제 필드명·단위 기준)
+        // ─────────────────────────────────────────────────────────────
+
+        // 수면 — sleepScore는 dailySleepDTO.sleepScores.overall.value 에 있음
+        //       (dailySleepDTO.sleepScore 는 존재하지 않음 → 기존 코드는 항상 50 폴백이었음)
+        const dto = sleepData?.dailySleepDTO;
+
+        // 심박
+        const heartRate = {
+            restingHeartRate: heartRateData?.restingHeartRate ?? null,
+            maxHeartRate: heartRateData?.maxHeartRate ?? null,
+            minHeartRate: heartRateData?.minHeartRate ?? null,
+            restingHR7dAvg: heartRateData?.lastSevenDaysAvgRestingHeartRate ?? null
+        };
+
+        // 수면
+        const sleep = {
+            sleepScore: dto?.sleepScores?.overall?.value ?? null,
+            sleepDurationHours: round1(dto?.sleepTimeSeconds != null ? dto.sleepTimeSeconds / 3600 : null),
+            deepSleepMin: roundInt(dto?.deepSleepSeconds != null ? dto.deepSleepSeconds / 60 : null),
+            lightSleepMin: roundInt(dto?.lightSleepSeconds != null ? dto.lightSleepSeconds / 60 : null),
+            remSleepMin: roundInt(dto?.remSleepSeconds != null ? dto.remSleepSeconds / 60 : null),
+            awakeMin: roundInt(dto?.awakeSleepSeconds != null ? dto.awakeSleepSeconds / 60 : null),
+            awakeCount: dto?.awakeCount ?? null,
+            sleepStress: dto?.avgSleepStress ?? null,
+            respirationAvg: dto?.averageRespirationValue ?? null,
+            sleepFeedback: dto?.sleepScoreFeedback ?? null
+        };
+
+        // HRV — 수면 데이터 최상위 필드에 이미 존재
+        const hrv = {
+            avgOvernightHrv: sleepData?.avgOvernightHrv ?? null,
+            hrvStatus: sleepData?.hrvStatus ?? null
+        };
+
+        // 스트레스 — dailyStress 일평균 (avgStressLevel)
+        const stressLevel = stressData?.avgStressLevel ?? null;
+
+        // 활동 — 최근 5개 (최근→과거 순, getActivities(0,5)가 이미 최신순)
+        const recentActivities = (activities ?? []).map(a => ({
+            type: a.activityType?.typeKey ?? null,
+            name: a.activityName ?? null,
+            startTime: a.startTimeLocal ?? null,
+            distanceKm: round2(a.distance != null ? a.distance / 1000 : null), // meters → km
+            durationMin: round1(a.duration != null ? a.duration / 60 : null),  // seconds → min
+            avgHr: a.averageHR ?? null,
+            calories: a.calories ?? null,
+            trainingEffect: a.aerobicTrainingEffect ?? null
+        }));
+
+        // 체성분 — weight-service dayview totalAverage (단위: mass는 그램, bodyFat는 %)
+        const ta = weightData?.totalAverage;
+        const body = {
+            weightKg: ta?.weight != null ? round1(ta.weight / 1000) : null,        // g → kg
+            bodyFatPct: ta?.bodyFat ?? null,                                        // %
+            muscleMassKg: ta?.muscleMass != null ? round1(ta.muscleMass / 1000) : null, // g → kg
+            bmi: ta?.bmi ?? null,
+            visceralFat: ta?.visceralFat ?? null,
+            metabolicAge: ta?.metabolicAge ?? null
+        };
+
+        // 수분 — raw hydration allData (단위: mL)
+        const hydration = {
+            hydrationML: hydrationRaw?.valueInML ?? null,
+            hydrationGoalML: hydrationRaw?.goalInML ?? null,
+            sweatLossML: hydrationRaw?.sweatLossInML ?? null
+        };
+
+        // 프로필 — userData (무게는 그램 → kg, 키는 cm, 성별 문자열)
+        const ud = settings?.userData;
+        const profile = {
+            age: computeAge(ud?.birthDate),
+            gender: ud?.gender ?? null,
+            activityClass: ud?.activityClass ?? ud?.activityLevel ?? null,
+            heightCm: ud?.height ?? null,
+            profileWeightKg: ud?.weight != null ? round1(ud.weight / 1000) : null, // g → kg
+            vo2Max: ud?.vo2MaxRunning ?? null
+        };
 
         return {
             date: dateString,
-            bodyBattery: 50,
-            sleepScore: sleepData?.dailySleepDTO?.sleepScore || 50,
-            restingHeartRate: heartRateData?.restingHeartRate || 60
+            ...heartRate,
+            ...sleep,
+            ...hrv,
+            stressLevel,
+            steps: steps ?? null,
+            recentActivities,
+            ...body,
+            ...hydration,
+            ...profile
         };
 
     } catch (error) {

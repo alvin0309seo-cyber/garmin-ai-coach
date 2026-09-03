@@ -26,7 +26,6 @@ app.get('/api/daily-plan', async (req, res) => {
         /* [가짜 데이터 시작] - 필요할 때만 주석을 지우고 사용하세요.
         const garminData = {
             date: "2026-08-07",
-            bodyBattery: 50,
             sleepScore: 50,
             restingHeartRate: 44
         };
