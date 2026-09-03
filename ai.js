@@ -145,7 +145,7 @@ ${inbodyDirective}
     `;
 
   try {
-        const result = await model.generateContent(prompt);
+        const result = await callGeminiWithRetry(prompt, model);
         const rawText = await result.response.text();
         
         // 1. AI가 가끔 실수로 붙이는 앞뒤 마크다운 기호를 깔끔하게 잘라냅니다.
@@ -168,6 +168,110 @@ ${inbodyDirective}
             coachComment: "데이터를 분석하는 과정에서 약간의 지연이 발생했습니다. 오늘은 무리하지 마시고 컨디션에 맞춰 가볍게 몸을 풀어주세요."
         };
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 🚨 핵심: Gemini API 일시적 과부하(503/429/500) 대응 — 스마트 재시도 (Phase 1)
+//   무료 Gemini API 는 과부하 시 503/429/RESOURCE_EXHAUSTED 를 자주 반환하므로,
+//   지수 백오프 + jitter + 시도별 temperature 변경으로 재시도한다.
+//   (Edge Function extract-inbody 의 지수 백오프 재시도와 동일한 방향성)
+// ─────────────────────────────────────────────────────────────────────────
+
+// 재시도 설정값
+const RETRY = {
+    maxRetries: 3,      // 최대 재시도 횟수 (초기 시도 + 3회 = 총 4회 시도)
+    baseDelayMs: 2000,  // 초기 지연 2초
+    backoffFactor: 2,   // 지연 배수 2배 → 2초 → 4초 → 8초
+    jitterRatio: 0.2,   // 지터 ±20% (동시 재충돌 방지)
+    maxTotalMs: 30000,  // 최대 총 시간 30초 (초과 시 포기)
+};
+
+// 시도별 temperature — 온도를 바꾸면 다른 샤드/인스턴스로 라우팅되어 과부하 회피 확률 증가.
+// 1차: 0.7 / 2차: 0.9 / 3차: 1.1 (범위 초과 시 마지막 값 유지)
+const RETRY_TEMPERATURES = [0.7, 0.9, 1.1];
+
+// 에러 메시지/상태코드로 재시도 여부 판단.
+//   재시도 안 함: HTTP 400/401/403/404 (요청 자체가 잘못됨 — 재시도 무의미)
+//   재시도 대상: HTTP 503/429/500, RESOURCE_EXHAUSTED, 네트워크 타임아웃/DNS 오류
+function shouldRetry(error) {
+    if (!error) return false;
+
+    const status = error.status ?? error.statusCode ?? '';
+    const message = String(error.message || '');
+    const text = `${message} ${status}`;
+
+    // (1) 재시도 안 함 — 의미 없는 요청
+    if (/\b(400|401|403|404)\b/.test(text)) return false;
+
+    // (2) 재시도 대상 — 일시적 장애 (HTTP 503/429/500)
+    if (/\b(503|429|500)\b/.test(text)) return true;
+    if (/RESOURCE_EXHAUSTED|Service Unavailable|Too Many Requests|Internal Server Error|overloaded|high demand/i.test(text)) return true;
+
+    // (3) 재시도 대상 — 네트워크 타임아웃 / DNS 오류
+    if (/timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|fetch failed|network|socket|DNS/i.test(text)) return true;
+
+    return false;
+}
+
+// 지수 백오프 지연 계산 (jitter ±20% 적용)
+function calcBackoffDelay(retryIndex) {
+    const base = RETRY.baseDelayMs * Math.pow(RETRY.backoffFactor, retryIndex); // 2s → 4s → 8s
+    const jitter = base * RETRY.jitterRatio * (Math.random() * 2 - 1);          // ±20% 무작위
+    return Math.round(base + jitter);
+}
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 로그용 에러 요약 (시크릿/키는 절대 출력하지 않음)
+function describeError(error) {
+    const status = error?.status ?? error?.statusCode;
+    const msg = String(error?.message || '');
+    return status ? `HTTP ${status} ${msg}` : (msg || 'unknown error');
+}
+
+// 프롬프트를 Gemini 에 전달하되, 일시적 장애는 설정대로 재시도하는 래퍼.
+// 모든 시도가 실패하면 마지막 에러를 throw → getAiRecommendation 의 catch 가 fallback 처리.
+async function callGeminiWithRetry(prompt, model, maxRetries = RETRY.maxRetries) {
+    let lastErr = null;
+    const startTime = Date.now();
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        // 시도마다 temperature 를 달리해 과부하 샤드 회피 확률을 높인다.
+        const temperature = RETRY_TEMPERATURES[Math.min(attempt, RETRY_TEMPERATURES.length - 1)];
+        model.generationConfig.temperature = temperature;
+
+        try {
+            const result = await model.generateContent(prompt);
+            if (attempt > 0) {
+                console.log(`✅ Gemini 재시도 성공 (${attempt}회 재시도, temperature ${temperature})`);
+            }
+            return result;
+        } catch (error) {
+            lastErr = error;
+
+            // 재시도 대상이 아니거나 마지막 시도였다면 즉시 throw (호출부에서 fallback 처리).
+            if (!shouldRetry(error) || attempt === maxRetries) {
+                throw error;
+            }
+
+            // 최대 총 시간(30초) 초과 시 포기.
+            if (Date.now() - startTime > RETRY.maxTotalMs) {
+                console.warn(`⏱️ Gemini 재시도 최대 총 시간(${RETRY.maxTotalMs / 1000}초) 초과 — 재시도 포기`);
+                throw error;
+            }
+
+            const delayMs = calcBackoffDelay(attempt);
+            const nextTemp = RETRY_TEMPERATURES[Math.min(attempt + 1, RETRY_TEMPERATURES.length - 1)];
+            console.log(
+                `⚠️ Gemini API 오류(${describeError(error)}) — ${delayMs}ms 후 재시도 ${attempt + 1}/${maxRetries} (temperature ${temperature} → ${nextTemp})`
+            );
+            await sleep(delayMs);
+        }
+    }
+
+    throw lastErr;
 }
 
 module.exports = { getAiRecommendation };
