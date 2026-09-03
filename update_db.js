@@ -29,10 +29,35 @@ async function uploadToDatabase() {
     try {
         console.log("🏃‍♂️ 1. 가민에서 진짜 내 데이터 가져오는 중...");
         const garminData = await getGarminData(); 
+
+        // 🚨 핵심: 최신 인바디 체성분 데이터 로드 (없으면 null → AI 프롬프트에서 생략)
+        // 🚨 핵심: supabase-js 는 테이블 미존재 등 오류를 throw 하지 않고 { error } 로 반환하므로
+        //    명시적으로 확인해 조용히 넘어가지 않게 한다 (silent fallback 금지).
+        let inbodyData = null;
+        try {
+            const { data: inbodyRows, error: inbodyErr } = await supabase
+                .from('inbody_results')
+                .select('raw_json, measured_at')
+                .order('measured_at', { ascending: false })
+                .limit(1);
+
+            if (inbodyErr) {
+                console.log('⚠️ 인바디 데이터 조회 실패 (무시하고 계속):', inbodyErr.message);
+            } else {
+                inbodyData = inbodyRows?.[0]?.raw_json || null;
+                if (inbodyData) {
+                    console.log('📊 최신 인바디 데이터 로드:', inbodyRows[0].measured_at);
+                } else {
+                    console.log('ℹ️ 인바디 데이터 없음 (아직 측정 기록 없음)');
+                }
+            }
+        } catch (e) {
+            console.log('⚠️ 인바디 데이터 로드 실패 (무시하고 계속):', e.message);
+        }
         
         console.log("🧠 2. 추천 로직 및 AI 코치 계획 생성 중...");
-        const recommendation = getBaseRecommendation(garminData);
-        const aiPlan = await getAiRecommendation(garminData, recommendation);
+        const recommendation = getBaseRecommendation(garminData, inbodyData);
+        const aiPlan = await getAiRecommendation(garminData, recommendation, inbodyData);
 
         // 가민 데이터 날짜(KST 기준)와 일치시킴
         const today = garminData.date;

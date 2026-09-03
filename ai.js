@@ -16,7 +16,7 @@ function fmt(v, unit) {
     return unit ? `${v}${unit}` : `${v}`;
 }
 
-async function getAiRecommendation(garminData, systemRule) {
+async function getAiRecommendation(garminData, systemRule, inbodyData = null) {
     // 🚨 핵심 수정: gemini-2.5-flash 가 더 이상 신규 사용자에게 제공되지 않아 404 발생.
     // gemini-3.6-flash 로 업데이트 (Google 권장).
     const model = genAI.getGenerativeModel({
@@ -39,6 +39,32 @@ async function getAiRecommendation(garminData, systemRule) {
             return `${i + 1}. ${parts.join(' ') || '정보 없음'}`;
         })
         .join('\n    ') || '최근 기록 없음';
+
+    // 🚨 핵심: 인바디 체성분 데이터가 있으면 프롬프트에 [체성분] 섹션을 추가.
+    //    없으면(null) 통째로 생략 — 미측정 항목은 fmt()가 "미측정"으로 표기.
+    const seg = inbodyData?.segmental || {};
+    const imp = inbodyData?.impedance || {};
+    const inbodySection = inbodyData ? `
+    [체성분 (인바디) - 가장 최근 측정]
+    - 측정일: ${fmt(inbodyData.measuredAt)}
+    - 체중: ${fmt(inbodyData.weightKg, 'kg')}
+    - 골격근량: ${fmt(inbodyData.skeletalMuscleKg, 'kg')}
+    - 체지방량: ${fmt(inbodyData.bodyFatKg, 'kg')}
+    - 체지방률: ${fmt(inbodyData.bodyFatPct, '%')}
+    - BMI: ${fmt(inbodyData.bmi)}
+    - 체수분: ${fmt(inbodyData.totalBodyWaterL, 'L')}
+    - 단백질: ${fmt(inbodyData.proteinKg, 'kg')}
+    - 무기질: ${fmt(inbodyData.mineralKg, 'kg')}
+    - 기초대사량: ${fmt(inbodyData.bmrKcal, 'kcal')}
+    - 내장지방레벨: ${fmt(inbodyData.visceralFatLevel)}
+    - 체형 진단: ${fmt(inbodyData.bodyType)}
+    - 부위별 근육량 — 우팔:${fmt(seg.rightArmKg, 'kg')} 좌팔:${fmt(seg.leftArmKg, 'kg')} 몸통:${fmt(seg.trunkKg, 'kg')} 우다리:${fmt(seg.rightLegKg, 'kg')} 좌다리:${fmt(seg.leftLegKg, 'kg')}
+    - 임피던스 — 우팔:${fmt(imp.rightArm)} 좌팔:${fmt(imp.leftArm)} 몸통:${fmt(imp.trunk)} 우다리:${fmt(imp.rightLeg)} 좌다리:${fmt(imp.leftLeg)}` : '';
+
+    // 인바디가 있을 때만 추가할 설계 지시문 (부족 부위 보완/불균형 교정 우선)
+    const inbodyDirective = inbodyData ? `
+    위 인바디 체성분 데이터를 바탕으로, 부족한 부위를 보완하고 불균형을 교정하는 운동을 우선 설계해.
+    체성분이 측정되지 않은 항목은 무시하고 실제 측정된 값만 참고할 것.` : '';
 
     // AI에게 전달할 프롬프트(명령어)
     const prompt = `
@@ -97,7 +123,7 @@ async function getAiRecommendation(garminData, systemRule) {
     - 신장: ${fmt(garminData.heightCm, 'cm')}
     - 프로필 기준 체중: ${fmt(garminData.profileWeightKg, 'kg')}
     - VO2Max: ${fmt(garminData.vo2Max)}
-
+${inbodySection}
     시스템이 계산한 오늘의 1차 가이드라인은 다음과 같아:
     - 권장 강도: ${systemRule.intensity}
     - 시스템 제안: ${systemRule.guideline}
@@ -105,6 +131,7 @@ async function getAiRecommendation(garminData, systemRule) {
     나는 평소 5km 이상의 러닝과 풀업, 푸시업을 포함한 웨이트 트레이닝을 즐겨 해.
     위 데이터를 바탕으로 오늘 수행할 구체적인 운동 계획을 JSON 형식으로 작성해 줘.
     ("미측정"으로 표시된 항목은 무시하고, 실제 측정된 값만으로 판단해.)
+${inbodyDirective}
 
     출력 형식 (반드시 아래 JSON 스키마를 따를 것):
     {
